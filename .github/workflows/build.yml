@@ -18,7 +18,7 @@ jobs:
           mkdir -p app/src/main/java/com/iitb/scheduletracker
 
           cat << 'EOF' > gradle.properties
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
           android.useAndroidX=true
           kotlin.code.style=official
           android.nonTransitiveRClass=true
@@ -47,7 +47,6 @@ jobs:
           plugins {
               id("com.android.application") version "8.5.2"
               id("org.jetbrains.kotlin.android") version "1.9.24"
-              id("org.jetbrains.kotlin.kapt") version "1.9.24"
           }
 
           android {
@@ -58,8 +57,8 @@ jobs:
                   applicationId = "com.iitb.scheduletracker"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 2
-                  versionName = "2.0-Pro"
+                  versionCode = 3
+                  versionName = "3.0-Pro"
               }
 
               buildFeatures {
@@ -74,6 +73,7 @@ jobs:
               }
               kotlinOptions {
                   jvmTarget = "17"
+                  freeCompilerArgs += listOf("-opt-in=androidx.compose.material3.ExperimentalMaterial3Api")
               }
           }
 
@@ -83,12 +83,6 @@ jobs:
               implementation(platform("androidx.compose:compose-bom:2024.06.00"))
               implementation("androidx.compose.ui:ui")
               implementation("androidx.compose.material3:material3")
-              implementation("androidx.compose.material:material-icons-extended")
-
-              val roomVersion = "2.6.1"
-              implementation("androidx.room:room-runtime:$roomVersion")
-              implementation("androidx.room:room-ktx:$roomVersion")
-              kapt("androidx.room:room-compiler:$roomVersion")
           }
           EOF
 
@@ -150,17 +144,12 @@ jobs:
           import androidx.activity.ComponentActivity
           import androidx.activity.compose.setContent
           import androidx.compose.animation.animateColorAsState
-          import androidx.compose.foundation.background
-          import androidx.compose.foundation.border
-          import androidx.compose.foundation.clickable
-          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.*
           import androidx.compose.foundation.layout.*
           import androidx.compose.foundation.lazy.LazyColumn
           import androidx.compose.foundation.lazy.items
-          import androidx.compose.foundation.rememberScrollState
           import androidx.compose.foundation.shape.CircleShape
           import androidx.compose.foundation.shape.RoundedCornerShape
-          import androidx.compose.foundation.verticalScroll
           import androidx.compose.material.icons.Icons
           import androidx.compose.material.icons.filled.*
           import androidx.compose.material3.*
@@ -178,23 +167,20 @@ jobs:
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
           import androidx.core.app.NotificationCompat
-          import androidx.room.*
-          import kotlinx.coroutines.*
-          import kotlinx.coroutines.flow.Flow
+          import kotlinx.coroutines.delay
           import org.json.JSONArray
           import org.json.JSONObject
           import java.text.SimpleDateFormat
           import java.util.*
 
-          // --- 1. ROOM OFFLINE DATABASE ---
-          @Entity(tableName = "schedule_items")
+          // --- 1. OFFLINE STORAGE ENGINE ---
           data class ScheduleItem(
-              @PrimaryKey(autoGenerate = true) val id: Int = 0,
+              val id: Int = (System.currentTimeMillis() % 100000000).toInt(),
               val title: String,
               val category: String,
               val location: String,
               val notes: String = "",
-              val priority: String = "Normal", // Normal, High, Urgent
+              val priority: String = "Normal",
               val eventTimeMillis: Long,
               val hour: Int,
               val minute: Int,
@@ -205,39 +191,65 @@ jobs:
               val isCompleted: Boolean = false
           )
 
-          @Dao
-          interface ScheduleDao {
-              @Query("SELECT * FROM schedule_items ORDER BY isPinned DESC, eventTimeMillis ASC")
-              fun getAllItems(): Flow<List<ScheduleItem>>
+          object OfflineStore {
+              private const val PREF_NAME = "iitb_schedule_pro_store"
+              private const val KEY_ITEMS = "schedule_json"
 
-              @Query("SELECT * FROM schedule_items WHERE isReminderActive = 1")
-              suspend fun getActiveItemsSync(): List<ScheduleItem>
-
-              @Insert(onConflict = OnConflictStrategy.REPLACE)
-              suspend fun insert(item: ScheduleItem): Long
-
-              @Update
-              suspend fun update(item: ScheduleItem)
-
-              @Delete
-              suspend fun delete(item: ScheduleItem)
-
-              @Query("DELETE FROM schedule_items WHERE isCompleted = 1")
-              suspend fun deleteCompleted()
-          }
-
-          @Database(entities = [ScheduleItem::class], version = 3, exportSchema = false)
-          abstract class AppDatabase : RoomDatabase() {
-              abstract fun dao(): ScheduleDao
-
-              companion object {
-                  @Volatile private var INSTANCE: AppDatabase? = null
-                  fun get(context: Context): AppDatabase =
-                      INSTANCE ?: synchronized(this) {
-                          Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "iitb_schedule.db")
-                              .fallbackToDestructiveMigration()
-                              .build().also { INSTANCE = it }
+              fun getAll(context: Context): List<ScheduleItem> {
+                  val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                  val raw = prefs.getString(KEY_ITEMS, "[]") ?: "[]"
+                  val list = mutableListOf<ScheduleItem>()
+                  try {
+                      val arr = JSONArray(raw)
+                      for (i in 0 until arr.length()) {
+                          val o = arr.getJSONObject(i)
+                          list.add(
+                              ScheduleItem(
+                                  id = o.optInt("id", i + 1),
+                                  title = o.optString("title", "Event"),
+                                  category = o.optString("category", "Classes & Labs"),
+                                  location = o.optString("location", "IITB Campus"),
+                                  notes = o.optString("notes", ""),
+                                  priority = o.optString("priority", "Normal"),
+                                  eventTimeMillis = o.optLong("eventTimeMillis", System.currentTimeMillis()),
+                                  hour = o.optInt("hour", 12),
+                                  minute = o.optInt("minute", 0),
+                                  recurringDays = o.optString("recurringDays", ""),
+                                  isReminderActive = o.optBoolean("isReminderActive", true),
+                                  alert15MinPrior = o.optBoolean("alert15MinPrior", true),
+                                  isPinned = o.optBoolean("isPinned", false),
+                                  isCompleted = o.optBoolean("isCompleted", false)
+                              )
+                          )
                       }
+                  } catch (_: Exception) {}
+                  return list.sortedWith(compareByDescending<ScheduleItem> { it.isPinned }.thenBy { it.eventTimeMillis })
+              }
+
+              fun saveAll(context: Context, items: List<ScheduleItem>) {
+                  val arr = JSONArray()
+                  items.forEach { item ->
+                      arr.put(JSONObject().apply {
+                          put("id", item.id)
+                          put("title", item.title)
+                          put("category", item.category)
+                          put("location", item.location)
+                          put("notes", item.notes)
+                          put("priority", item.priority)
+                          put("eventTimeMillis", item.eventTimeMillis)
+                          put("hour", item.hour)
+                          put("minute", item.minute)
+                          put("recurringDays", item.recurringDays)
+                          put("isReminderActive", item.isReminderActive)
+                          put("alert15MinPrior", item.alert15MinPrior)
+                          put("isPinned", item.isPinned)
+                          put("isCompleted", item.isCompleted)
+                      })
+                  }
+                  context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                      .edit()
+                      .putString(KEY_ITEMS, arr.toString())
+                      .apply()
               }
           }
 
@@ -258,7 +270,6 @@ jobs:
 
                   val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-                  // Handle 15-Minute Snooze Action from Notification
                   if (action == "ACTION_SNOOZE_15M") {
                       manager.cancel(id)
                       AlarmScheduler.scheduleSnooze(context, id, title, category, location, notes)
@@ -271,9 +282,7 @@ jobs:
                           channelId,
                           "IITB Schedule & 2-Hour Alerts",
                           NotificationManager.IMPORTANCE_HIGH
-                      ).apply {
-                          enableVibration(true)
-                      }
+                      ).apply { enableVibration(true) }
                       manager.createNotificationChannel(channel)
                   }
 
@@ -306,28 +315,20 @@ jobs:
 
                   manager.notify(id, notification)
 
-                  // Auto-reschedule next week's occurrence if recurring
                   if (recurringDays.isNotBlank() && alertLabel == "in 2 Hours") {
-                      val pendingResult = goAsync()
-                      CoroutineScope(Dispatchers.IO).launch {
-                          try {
-                              val nextEventTime = AlarmScheduler.computeNextRecurringMillis(
-                                  hour = hour,
-                                  minute = minute,
-                                  recurringDaysCsv = recurringDays,
-                                  afterTimeMillis = currentEventMillis + 60_000L
-                              )
-                              val dao = AppDatabase.get(context).dao()
-                              val activeItems = dao.getActiveItemsSync()
-                              val currentItem = activeItems.find { it.id == id }
-                              if (currentItem != null) {
-                                  val updated = currentItem.copy(eventTimeMillis = nextEventTime)
-                                  dao.update(updated)
-                                  AlarmScheduler.scheduleReminders(context, updated)
-                              }
-                          } finally {
-                              pendingResult.finish()
-                          }
+                      val nextEventTime = AlarmScheduler.computeNextRecurringMillis(
+                          hour = hour,
+                          minute = minute,
+                          recurringDaysCsv = recurringDays,
+                          afterTimeMillis = currentEventMillis + 60_000L
+                      )
+                      val all = OfflineStore.getAll(context).toMutableList()
+                      val idx = all.indexOfFirst { it.id == id }
+                      if (idx >= 0) {
+                          val updated = all[idx].copy(eventTimeMillis = nextEventTime)
+                          all[idx] = updated
+                          OfflineStore.saveAll(context, all)
+                          AlarmScheduler.scheduleReminders(context, updated)
                       }
                   }
               }
@@ -335,40 +336,28 @@ jobs:
 
           class BootCompletedReceiver : BroadcastReceiver() {
               override fun onReceive(context: Context, intent: Intent) {
-                  val validActions = setOf(
-                      Intent.ACTION_BOOT_COMPLETED,
-                      Intent.ACTION_LOCKED_BOOT_COMPLETED,
-                      "android.intent.action.QUICKBOOT_POWERON",
-                      Intent.ACTION_MY_PACKAGE_REPLACED
-                  )
-                  if (intent.action !in validActions) return
-
-                  val pendingResult = goAsync()
-                  CoroutineScope(Dispatchers.IO).launch {
-                      try {
-                          val dao = AppDatabase.get(context).dao()
-                          val activeItems = dao.getActiveItemsSync()
-                          val now = System.currentTimeMillis()
-
-                          activeItems.forEach { item ->
-                              if (item.recurringDays.isNotBlank()) {
-                                  val nextOccurrence = AlarmScheduler.computeNextRecurringMillis(
-                                      hour = item.hour,
-                                      minute = item.minute,
-                                      recurringDaysCsv = item.recurringDays,
-                                      afterTimeMillis = now
-                                  )
-                                  val updatedItem = item.copy(eventTimeMillis = nextOccurrence)
-                                  dao.update(updatedItem)
-                                  AlarmScheduler.scheduleReminders(context, updatedItem)
-                              } else if (item.eventTimeMillis > now) {
-                                  AlarmScheduler.scheduleReminders(context, item)
-                              }
+                  val now = System.currentTimeMillis()
+                  val items = OfflineStore.getAll(context).toMutableList()
+                  var changed = false
+                  items.forEachIndexed { idx, item ->
+                      if (item.isReminderActive && !item.isCompleted) {
+                          if (item.recurringDays.isNotBlank()) {
+                              val nextOccurrence = AlarmScheduler.computeNextRecurringMillis(
+                                  hour = item.hour,
+                                  minute = item.minute,
+                                  recurringDaysCsv = item.recurringDays,
+                                  afterTimeMillis = now
+                              )
+                              val updated = item.copy(eventTimeMillis = nextOccurrence)
+                              items[idx] = updated
+                              changed = true
+                              AlarmScheduler.scheduleReminders(context, updated)
+                          } else if (item.eventTimeMillis > now) {
+                              AlarmScheduler.scheduleReminders(context, item)
                           }
-                      } finally {
-                          pendingResult.finish()
                       }
                   }
+                  if (changed) OfflineStore.saveAll(context, items)
               }
           }
 
@@ -385,7 +374,6 @@ jobs:
                   val activeDays = recurringDaysCsv.split(",")
                       .mapNotNull { it.trim().toIntOrNull() }
                       .toSet()
-
                   if (activeDays.isEmpty()) return afterTimeMillis
 
                   val cal = Calendar.getInstance().apply {
@@ -410,14 +398,12 @@ jobs:
 
               fun scheduleReminders(context: Context, item: ScheduleItem) {
                   val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-
                   val targetEventMillis = if (item.recurringDays.isNotBlank()) {
                       computeNextRecurringMillis(item.hour, item.minute, item.recurringDays)
                   } else {
                       item.eventTimeMillis
                   }
 
-                  // 1. Primary 2-Hour Prior Reminder (RequestCode = id * 10 + 1)
                   scheduleSingleAlarm(
                       context = context,
                       alarmManager = alarmManager,
@@ -426,10 +412,9 @@ jobs:
                       targetEventMillis = targetEventMillis,
                       triggerMillis = targetEventMillis - TWO_HOURS_MILLIS,
                       alertLabel = "in 2 Hours",
-                      enabled = item.isReminderActive
+                      enabled = item.isReminderActive && !item.isCompleted
                   )
 
-                  // 2. Secondary 15-Minute Prior Heads-Up (RequestCode = id * 10 + 2)
                   scheduleSingleAlarm(
                       context = context,
                       alarmManager = alarmManager,
@@ -438,7 +423,7 @@ jobs:
                       targetEventMillis = targetEventMillis,
                       triggerMillis = targetEventMillis - FIFTEEN_MIN_MILLIS,
                       alertLabel = "in 15 Mins",
-                      enabled = item.isReminderActive && item.alert15MinPrior
+                      enabled = item.isReminderActive && !item.isCompleted && item.alert15MinPrior
                   )
               }
 
@@ -485,11 +470,11 @@ jobs:
                   }
 
                   if (finalTrigger > now) {
-                      alarmManager.setExactAndAllowWhileIdle(
-                          AlarmManager.RTC_WAKEUP,
-                          finalTrigger,
-                          pendingIntent
-                      )
+                      try {
+                          alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, finalTrigger, pendingIntent)
+                      } catch (_: SecurityException) {
+                          alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, finalTrigger, pendingIntent)
+                      }
                   }
               }
 
@@ -517,7 +502,11 @@ jobs:
                       intent,
                       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                   )
-                  alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+                  try {
+                      alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+                  } catch (_: SecurityException) {
+                      alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+                  }
               }
           }
 
@@ -528,7 +517,6 @@ jobs:
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
                   }
-                  val db = AppDatabase.get(this)
 
                   setContent {
                       MaterialTheme(
@@ -540,7 +528,7 @@ jobs:
                               onSurface = Color.White
                           )
                       ) {
-                          OneUiProApp(db.dao())
+                          OneUiProApp()
                       }
                   }
               }
@@ -557,10 +545,15 @@ jobs:
           )
 
           @Composable
-          fun OneUiProApp(dao: ScheduleDao) {
+          fun OneUiProApp() {
               val context = LocalContext.current
-              val scope = rememberCoroutineScope()
-              val allItems by dao.getAllItems().collectAsState(initial = emptyList())
+              var allItems by remember { mutableStateOf(OfflineStore.getAll(context)) }
+
+              fun persist(updatedList: List<ScheduleItem>) {
+                  val sorted = updatedList.sortedWith(compareByDescending<ScheduleItem> { it.isPinned }.thenBy { it.eventTimeMillis })
+                  OfflineStore.saveAll(context, sorted)
+                  allItems = sorted
+              }
 
               var currentTab by remember { mutableStateOf(0) }
               var editingItem by remember { mutableStateOf<ScheduleItem?>(null) }
@@ -591,7 +584,7 @@ jobs:
                           NavigationBarItem(
                               selected = currentTab == 0,
                               onClick = { currentTab = 0 },
-                              icon = { Icon(Icons.Default.Schedule, contentDescription = null) },
+                              icon = { Icon(Icons.Default.DateRange, contentDescription = null) },
                               label = { Text("Schedule") }
                           )
                           NavigationBarItem(
@@ -628,39 +621,32 @@ jobs:
                                   showAddOrEditDialog = true
                               },
                               onToggleActive = { item, enabled ->
-                                  scope.launch {
-                                      val updated = item.copy(isReminderActive = enabled)
-                                      dao.update(updated)
-                                      AlarmScheduler.scheduleReminders(context, updated)
-                                  }
+                                  val updated = item.copy(isReminderActive = enabled)
+                                  persist(allItems.map { if (it.id == item.id) updated else it })
+                                  AlarmScheduler.scheduleReminders(context, updated)
                               },
                               onTogglePin = { item ->
-                                  scope.launch {
-                                      dao.update(item.copy(isPinned = !item.isPinned))
-                                  }
+                                  val updated = item.copy(isPinned = !item.isPinned)
+                                  persist(allItems.map { if (it.id == item.id) updated else it })
                               },
                               onDelete = { item ->
-                                  scope.launch {
-                                      AlarmScheduler.scheduleReminders(context, item.copy(isReminderActive = false))
-                                      dao.delete(item)
-                                  }
+                                  AlarmScheduler.scheduleReminders(context, item.copy(isReminderActive = false))
+                                  persist(allItems.filterNot { it.id == item.id })
                               }
                           )
                           1 -> TasksChecklistScreen(
                               allItems = allItems,
                               onToggleComplete = { item ->
-                                  scope.launch {
-                                      val completed = !item.isCompleted
-                                      val updated = item.copy(
-                                          isCompleted = completed,
-                                          isReminderActive = if (completed) false else item.isReminderActive
-                                      )
-                                      dao.update(updated)
-                                      AlarmScheduler.scheduleReminders(context, updated)
-                                  }
+                                  val completed = !item.isCompleted
+                                  val updated = item.copy(
+                                      isCompleted = completed,
+                                      isReminderActive = if (completed) false else item.isReminderActive
+                                  )
+                                  persist(allItems.map { if (it.id == item.id) updated else it })
+                                  AlarmScheduler.scheduleReminders(context, updated)
                               },
                               onClearCompleted = {
-                                  scope.launch { dao.deleteCompleted() }
+                                  persist(allItems.filterNot { it.isCompleted })
                               },
                               onEdit = { item ->
                                   editingItem = item
@@ -671,13 +657,13 @@ jobs:
                           3 -> StatsAndBackupScreen(
                               allItems = allItems,
                               onImportItems = { importedList ->
-                                  scope.launch {
-                                      importedList.forEach { item ->
-                                          val newId = dao.insert(item.copy(id = 0)).toInt()
-                                          AlarmScheduler.scheduleReminders(context, item.copy(id = newId))
-                                      }
-                                      Toast.makeText(context, "Imported ${importedList.size} events!", Toast.LENGTH_SHORT).show()
+                                  val merged = allItems.toMutableList()
+                                  importedList.forEach { item ->
+                                      merged.add(item)
+                                      AlarmScheduler.scheduleReminders(context, item)
                                   }
+                                  persist(merged)
+                                  Toast.makeText(context, "Imported ${importedList.size} events!", Toast.LENGTH_SHORT).show()
                               }
                           )
                       }
@@ -689,23 +675,20 @@ jobs:
                           categories = ALL_CATEGORIES.drop(1),
                           onDismiss = { showAddOrEditDialog = false },
                           onSave = { savedItem ->
-                              scope.launch {
-                                  if (editingItem == null) {
-                                      val newId = dao.insert(savedItem).toInt()
-                                      AlarmScheduler.scheduleReminders(context, savedItem.copy(id = newId))
-                                  } else {
-                                      dao.update(savedItem)
-                                      AlarmScheduler.scheduleReminders(context, savedItem)
-                                  }
-                                  showAddOrEditDialog = false
+                              val updatedList = if (editingItem == null) {
+                                  allItems + savedItem
+                              } else {
+                                  allItems.map { if (it.id == savedItem.id) savedItem else it }
                               }
+                              persist(updatedList)
+                              AlarmScheduler.scheduleReminders(context, savedItem)
+                              showAddOrEditDialog = false
                           }
                       )
                   }
               }
           }
 
-          // --- TAB 0: SAMSUNG CLOCK SCHEDULE SCREEN ---
           @Composable
           fun ScheduleTabScreen(
               allItems: List<ScheduleItem>,
@@ -749,7 +732,6 @@ jobs:
                       .fillMaxSize()
                       .padding(horizontal = 16.dp)
               ) {
-                  // Samsung Clock Countdown Header
                   Box(
                       modifier = Modifier
                           .fillMaxWidth()
@@ -764,12 +746,7 @@ jobs:
                               val mins = diffMin % 60
                               val timeText = if (days > 0) "Next in ${days}d ${hrs}h ${mins}m" else "Next in ${hrs}h ${mins}m"
 
-                              Text(
-                                  text = timeText,
-                                  fontSize = 28.sp,
-                                  fontWeight = FontWeight.Light,
-                                  color = Color.White
-                              )
+                              Text(text = timeText, fontSize = 28.sp, fontWeight = FontWeight.Light, color = Color.White)
                               Spacer(modifier = Modifier.height(4.dp))
                               Text(
                                   text = "${nextUpcoming.title} • ${nextUpcoming.location}",
@@ -778,22 +755,12 @@ jobs:
                                   fontWeight = FontWeight.Medium
                               )
                           } else {
-                              Text(
-                                  text = "All Caught Up",
-                                  fontSize = 28.sp,
-                                  fontWeight = FontWeight.Light,
-                                  color = Color.White
-                              )
-                              Text(
-                                  text = "2-hour & 15-min offline reminders armed",
-                                  fontSize = 13.sp,
-                                  color = Color.Gray
-                              )
+                              Text(text = "All Caught Up", fontSize = 28.sp, fontWeight = FontWeight.Light, color = Color.White)
+                              Text(text = "2-hour & 15-min offline reminders armed", fontSize = 13.sp, color = Color.Gray)
                           }
                       }
                   }
 
-                  // Search Bar
                   OutlinedTextField(
                       value = searchQuery,
                       onValueChange = { searchQuery = it },
@@ -813,7 +780,6 @@ jobs:
                           .padding(bottom = 12.dp)
                   )
 
-                  // Category Filter Pills
                   Row(
                       modifier = Modifier
                           .fillMaxWidth()
@@ -874,9 +840,7 @@ jobs:
               val activeRecurringSet = remember(item.recurringDays) {
                   item.recurringDays.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
               }
-              val weekDays = listOf(
-                  1 to "S", 2 to "M", 3 to "T", 4 to "W", 5 to "T", 6 to "F", 7 to "S"
-              )
+              val weekDays = listOf(1 to "S", 2 to "M", 3 to "T", 4 to "W", 5 to "T", 6 to "F", 7 to "S")
 
               Surface(
                   shape = RoundedCornerShape(26.dp),
@@ -899,12 +863,7 @@ jobs:
                   ) {
                       Column(modifier = Modifier.weight(1f)) {
                           Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                              Box(
-                                  modifier = Modifier
-                                      .size(8.dp)
-                                      .clip(CircleShape)
-                                      .background(priorityColor)
-                              )
+                              Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(priorityColor))
                               Text(
                                   text = "${item.category} • ${item.location}",
                                   color = priorityColor.copy(alpha = textAlpha),
@@ -948,13 +907,9 @@ jobs:
                           }
 
                           Spacer(modifier = Modifier.height(6.dp))
-
                           val alertBadge = if (item.alert15MinPrior) "2h + 15m alerts" else "2h alert"
                           if (activeRecurringSet.isNotEmpty()) {
-                              Row(
-                                  horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                  verticalAlignment = Alignment.CenterVertically
-                              ) {
+                              Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                                   weekDays.forEach { (dayNum, label) ->
                                       val isDaySelected = dayNum in activeRecurringSet
                                       Text(
@@ -968,16 +923,12 @@ jobs:
                                           }
                                       )
                                   }
-                                  Text(
-                                      text = " • $alertBadge",
-                                      color = Color.Gray.copy(alpha = textAlpha),
-                                      fontSize = 11.sp
-                                  )
+                                  Text(text = " • $alertBadge", color = Color.Gray.copy(alpha = textAlpha), fontSize = 11.sp)
                               }
                           } else {
                               Row(verticalAlignment = Alignment.CenterVertically) {
                                   Icon(
-                                      Icons.Default.NotificationsActive,
+                                      Icons.Default.Notifications,
                                       contentDescription = null,
                                       tint = Color.Gray.copy(alpha = textAlpha),
                                       modifier = Modifier.size(13.dp)
@@ -1024,7 +975,6 @@ jobs:
               }
           }
 
-          // --- TAB 1: TASKS & SUB-CHECKLIST SCREEN ---
           @Composable
           fun TasksChecklistScreen(
               allItems: List<ScheduleItem>,
@@ -1114,7 +1064,6 @@ jobs:
               }
           }
 
-          // --- TAB 2: SAMSUNG CLOCK FOCUS TIMER & LAB STOPWATCH ---
           @Composable
           fun FocusAndStopwatchScreen() {
               var selectedDurationSec by remember { mutableStateOf(25 * 60) }
@@ -1147,7 +1096,6 @@ jobs:
                       .padding(16.dp),
                   verticalArrangement = Arrangement.spacedBy(18.dp)
               ) {
-                  // 1. Focus / Pomodoro Timer Card
                   Surface(
                       shape = RoundedCornerShape(28.dp),
                       color = Color(0xFF1C1C1E),
@@ -1204,7 +1152,6 @@ jobs:
                       }
                   }
 
-                  // 2. Lab / Testing Stopwatch Card
                   Surface(
                       shape = RoundedCornerShape(28.dp),
                       color = Color(0xFF1C1C1E),
@@ -1267,7 +1214,6 @@ jobs:
               }
           }
 
-          // --- TAB 3: ANALYTICS & OFFLINE CLIPBOARD JSON SYNC ---
           @Composable
           fun StatsAndBackupScreen(
               allItems: List<ScheduleItem>,
@@ -1286,7 +1232,6 @@ jobs:
               ) {
                   Text("Schedule Analytics & Sync", fontSize = 24.sp, fontWeight = FontWeight.Light, color = Color.White)
 
-                  // Quick Stats Row
                   Row(
                       modifier = Modifier.fillMaxWidth(),
                       horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -1296,7 +1241,6 @@ jobs:
                       StatBox("Done", allItems.count { it.isCompleted }.toString(), Modifier.weight(1f))
                   }
 
-                  // Category Breakdown Card
                   Surface(
                       shape = RoundedCornerShape(24.dp),
                       color = Color(0xFF1C1C1E),
@@ -1317,7 +1261,6 @@ jobs:
                       }
                   }
 
-                  // Offline JSON Backup & Restore Card
                   Surface(
                       shape = RoundedCornerShape(24.dp),
                       color = Color(0xFF1C1C1E),
@@ -1372,8 +1315,9 @@ jobs:
                                           val obj = arr.getJSONObject(i)
                                           list.add(
                                               ScheduleItem(
+                                                  id = (System.currentTimeMillis() % 100000000).toInt() + i,
                                                   title = obj.optString("title", "Imported Event"),
-                                                  category = obj.optString("category", "Daily Schedule"),
+                                                  category = obj.optString("category", "Classes & Labs"),
                                                   location = obj.optString("location", "IITB Campus"),
                                                   notes = obj.optString("notes", ""),
                                                   priority = obj.optString("priority", "Normal"),
@@ -1388,7 +1332,7 @@ jobs:
                                           onImportItems(list)
                                           importJsonText = ""
                                       }
-                                  } catch (e: Exception) {
+                                  } catch (_: Exception) {
                                       Toast.makeText(context, "Invalid JSON format", Toast.LENGTH_SHORT).show()
                                   }
                               },
@@ -1418,7 +1362,6 @@ jobs:
               }
           }
 
-          // --- 4. ADD / EDIT DIALOG WITH IITB VENUE PRESETS, PRIORITY & MULTI-ALERTS ---
           @Composable
           fun AddOrEditScheduleDialog(
               initialItem: ScheduleItem?,
@@ -1449,9 +1392,7 @@ jobs:
                       initialItem?.recurringDays?.split(",")?.mapNotNull { it.trim().toIntOrNull() }?.let { addAll(it) }
                   }
               }
-              val weekDays = listOf(
-                  1 to "S", 2 to "M", 3 to "T", 4 to "W", 5 to "T", 6 to "F", 7 to "S"
-              )
+              val weekDays = listOf(1 to "S", 2 to "M", 3 to "T", 4 to "W", 5 to "T", 6 to "F", 7 to "S")
 
               var showDatePicker by remember { mutableStateOf(false) }
               var showTimePicker by remember { mutableStateOf(false) }
@@ -1488,7 +1429,6 @@ jobs:
                               modifier = Modifier.fillMaxWidth()
                           )
 
-                          // Quick IITB Venue Chips
                           Row(
                               modifier = Modifier.horizontalScroll(rememberScrollState()),
                               horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1510,7 +1450,6 @@ jobs:
                               modifier = Modifier.fillMaxWidth()
                           )
 
-                          // Time & Calendar Date Pickers
                           Row(
                               modifier = Modifier.fillMaxWidth(),
                               horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1520,8 +1459,6 @@ jobs:
                                   modifier = Modifier.weight(1f),
                                   shape = RoundedCornerShape(14.dp)
                               ) {
-                                  Icon(Icons.Default.Schedule, contentDescription = null, modifier = Modifier.size(16.dp))
-                                  Spacer(modifier = Modifier.width(6.dp))
                                   val amPm = if (selectedHour >= 12) "PM" else "AM"
                                   val displayHr = if (selectedHour % 12 == 0) 12 else selectedHour % 12
                                   Text(String.format("%02d:%02d %s", displayHr, selectedMinute, amPm))
@@ -1535,8 +1472,6 @@ jobs:
                                   modifier = Modifier.weight(1f),
                                   shape = RoundedCornerShape(14.dp)
                               ) {
-                                  Icon(Icons.Default.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
-                                  Spacer(modifier = Modifier.width(6.dp))
                                   Text(
                                       text = if (selectedWeekDays.isEmpty()) dateFormatter.format(Date(selectedDateMillis)) else "Weekly",
                                       maxLines = 1,
@@ -1545,7 +1480,6 @@ jobs:
                               }
                           }
 
-                          // S M T W T F S Weekly Selector
                           Text("Repeat Weekly (Optional):", color = Color.Gray, fontSize = 12.sp)
                           Row(
                               modifier = Modifier.fillMaxWidth(),
@@ -1579,7 +1513,6 @@ jobs:
                               }
                           }
 
-                          // Priority Selector
                           Text("Priority:", color = Color.Gray, fontSize = 12.sp)
                           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                               listOf("Normal", "High", "Urgent").forEach { p ->
@@ -1591,7 +1524,6 @@ jobs:
                               }
                           }
 
-                          // Category Selector
                           Text("Category:", color = Color.Gray, fontSize = 12.sp)
                           Row(
                               modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -1606,7 +1538,6 @@ jobs:
                               }
                           }
 
-                          // Extra Toggles (15m Heads-Up & Pin)
                           Row(
                               modifier = Modifier.fillMaxWidth(),
                               horizontalArrangement = Arrangement.SpaceBetween,
@@ -1629,39 +1560,39 @@ jobs:
                   confirmButton = {
                       Button(
                           onClick = {
-                              if (title.isBlank()) return@Button
-                              val recurringCsv = selectedWeekDays.sorted().joinToString(",")
+                              if (title.isNotBlank()) {
+                                  val recurringCsv = selectedWeekDays.sorted().joinToString(",")
+                                  val computedMillis = if (recurringCsv.isNotBlank()) {
+                                      AlarmScheduler.computeNextRecurringMillis(selectedHour, selectedMinute, recurringCsv)
+                                  } else {
+                                      Calendar.getInstance().apply {
+                                          timeInMillis = selectedDateMillis
+                                          set(Calendar.HOUR_OF_DAY, selectedHour)
+                                          set(Calendar.MINUTE, selectedMinute)
+                                          set(Calendar.SECOND, 0)
+                                          set(Calendar.MILLISECOND, 0)
+                                      }.timeInMillis
+                                  }
 
-                              val computedMillis = if (recurringCsv.isNotBlank()) {
-                                  AlarmScheduler.computeNextRecurringMillis(selectedHour, selectedMinute, recurringCsv)
-                              } else {
-                                  Calendar.getInstance().apply {
-                                      timeInMillis = selectedDateMillis
-                                      set(Calendar.HOUR_OF_DAY, selectedHour)
-                                      set(Calendar.MINUTE, selectedMinute)
-                                      set(Calendar.SECOND, 0)
-                                      set(Calendar.MILLISECOND, 0)
-                                  }.timeInMillis
-                              }
-
-                              onSave(
-                                  ScheduleItem(
-                                      id = initialItem?.id ?: 0,
-                                      title = title.trim(),
-                                      category = category,
-                                      location = location.trim().ifBlank { "IITB Campus" },
-                                      notes = notes.trim(),
-                                      priority = priority,
-                                      eventTimeMillis = computedMillis,
-                                      hour = selectedHour,
-                                      minute = selectedMinute,
-                                      recurringDays = recurringCsv,
-                                      isReminderActive = true,
-                                      alert15MinPrior = alert15MinPrior,
-                                      isPinned = isPinned,
-                                      isCompleted = initialItem?.isCompleted ?: false
+                                  onSave(
+                                      ScheduleItem(
+                                          id = initialItem?.id ?: (System.currentTimeMillis() % 100000000).toInt(),
+                                          title = title.trim(),
+                                          category = category,
+                                          location = location.trim().ifBlank { "IITB Campus" },
+                                          notes = notes.trim(),
+                                          priority = priority,
+                                          eventTimeMillis = computedMillis,
+                                          hour = selectedHour,
+                                          minute = selectedMinute,
+                                          recurringDays = recurringCsv,
+                                          isReminderActive = true,
+                                          alert15MinPrior = alert15MinPrior,
+                                          isPinned = isPinned,
+                                          isCompleted = initialItem?.isCompleted ?: false
+                                      )
                                   )
-                              )
+                              }
                           },
                           colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF387AFF))
                       ) {
@@ -1741,7 +1672,7 @@ jobs:
           gradle-version: '8.7'
 
       - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Upload Compiled APK
         uses: actions/upload-artifact@v4
