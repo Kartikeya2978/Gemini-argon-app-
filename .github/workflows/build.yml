@@ -1,0 +1,1750 @@
+name: Build IITB Schedule Pro APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Complete Android Project Files
+        run: |
+          mkdir -p app/src/main/java/com/iitb/scheduletracker
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "IITBSchedule"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.5.2"
+              id("org.jetbrains.kotlin.android") version "1.9.24"
+              id("org.jetbrains.kotlin.kapt") version "1.9.24"
+          }
+
+          android {
+              namespace = "com.iitb.scheduletracker"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.iitb.scheduletracker"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "2.0-Pro"
+              }
+
+              buildFeatures {
+                  compose = true
+              }
+              composeOptions {
+                  kotlinCompilerExtensionVersion = "1.5.14"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.activity:activity-compose:1.9.0")
+              implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+
+              val roomVersion = "2.6.1"
+              implementation("androidx.room:room-runtime:$roomVersion")
+              implementation("androidx.room:room-ktx:$roomVersion")
+              kapt("androidx.room:room-compiler:$roomVersion")
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+              <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="IITB Clock Pro"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <receiver
+                      android:name=".ReminderReceiver"
+                      android:exported="false" />
+
+                  <receiver
+                      android:name=".BootCompletedReceiver"
+                      android:enabled="true"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/iitb/scheduletracker/MainActivity.kt
+          @file:OptIn(ExperimentalMaterial3Api::class)
+
+          package com.iitb.scheduletracker
+
+          import android.Manifest
+          import android.app.*
+          import android.content.*
+          import android.os.*
+          import android.widget.Toast
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.animation.animateColorAsState
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalClipboardManager
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.AnnotatedString
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextDecoration
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.core.app.NotificationCompat
+          import androidx.room.*
+          import kotlinx.coroutines.*
+          import kotlinx.coroutines.flow.Flow
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          // --- 1. ROOM OFFLINE DATABASE ---
+          @Entity(tableName = "schedule_items")
+          data class ScheduleItem(
+              @PrimaryKey(autoGenerate = true) val id: Int = 0,
+              val title: String,
+              val category: String,
+              val location: String,
+              val notes: String = "",
+              val priority: String = "Normal", // Normal, High, Urgent
+              val eventTimeMillis: Long,
+              val hour: Int,
+              val minute: Int,
+              val recurringDays: String = "",
+              val isReminderActive: Boolean = true,
+              val alert15MinPrior: Boolean = true,
+              val isPinned: Boolean = false,
+              val isCompleted: Boolean = false
+          )
+
+          @Dao
+          interface ScheduleDao {
+              @Query("SELECT * FROM schedule_items ORDER BY isPinned DESC, eventTimeMillis ASC")
+              fun getAllItems(): Flow<List<ScheduleItem>>
+
+              @Query("SELECT * FROM schedule_items WHERE isReminderActive = 1")
+              suspend fun getActiveItemsSync(): List<ScheduleItem>
+
+              @Insert(onConflict = OnConflictStrategy.REPLACE)
+              suspend fun insert(item: ScheduleItem): Long
+
+              @Update
+              suspend fun update(item: ScheduleItem)
+
+              @Delete
+              suspend fun delete(item: ScheduleItem)
+
+              @Query("DELETE FROM schedule_items WHERE isCompleted = 1")
+              suspend fun deleteCompleted()
+          }
+
+          @Database(entities = [ScheduleItem::class], version = 3, exportSchema = false)
+          abstract class AppDatabase : RoomDatabase() {
+              abstract fun dao(): ScheduleDao
+
+              companion object {
+                  @Volatile private var INSTANCE: AppDatabase? = null
+                  fun get(context: Context): AppDatabase =
+                      INSTANCE ?: synchronized(this) {
+                          Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "iitb_schedule.db")
+                              .fallbackToDestructiveMigration()
+                              .build().also { INSTANCE = it }
+                      }
+              }
+          }
+
+          // --- 2. MULTI-STAGE ALARM ENGINE & SNOOZE RECEIVER ---
+          class ReminderReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  val action = intent.action
+                  val id = intent.getIntExtra("ID", 0)
+                  val title = intent.getStringExtra("TITLE") ?: "Upcoming Event"
+                  val category = intent.getStringExtra("CATEGORY") ?: "Schedule"
+                  val location = intent.getStringExtra("LOCATION") ?: "IITB Campus"
+                  val notes = intent.getStringExtra("NOTES") ?: ""
+                  val alertLabel = intent.getStringExtra("ALERT_LABEL") ?: "in 2 Hours"
+                  val hour = intent.getIntExtra("HOUR", 12)
+                  val minute = intent.getIntExtra("MINUTE", 0)
+                  val recurringDays = intent.getStringExtra("RECURRING_DAYS") ?: ""
+                  val currentEventMillis = intent.getLongExtra("EVENT_TIME", System.currentTimeMillis())
+
+                  val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+                  // Handle 15-Minute Snooze Action from Notification
+                  if (action == "ACTION_SNOOZE_15M") {
+                      manager.cancel(id)
+                      AlarmScheduler.scheduleSnooze(context, id, title, category, location, notes)
+                      return
+                  }
+
+                  val channelId = "iitb_schedule_pro_alerts"
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(
+                          channelId,
+                          "IITB Schedule & 2-Hour Alerts",
+                          NotificationManager.IMPORTANCE_HIGH
+                      ).apply {
+                          enableVibration(true)
+                      }
+                      manager.createNotificationChannel(channel)
+                  }
+
+                  val snoozeIntent = Intent(context, ReminderReceiver::class.java).apply {
+                      this.action = "ACTION_SNOOZE_15M"
+                      putExtra("ID", id)
+                      putExtra("TITLE", title)
+                      putExtra("CATEGORY", category)
+                      putExtra("LOCATION", location)
+                      putExtra("NOTES", notes)
+                  }
+                  val snoozePending = PendingIntent.getBroadcast(
+                      context,
+                      id * 100 + 99,
+                      snoozeIntent,
+                      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                  )
+
+                  val bodyText = if (notes.isNotBlank()) "Venue: $location • $notes" else "Venue: $location"
+
+                  val notification = NotificationCompat.Builder(context, channelId)
+                      .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                      .setContentTitle("[$category] $alertLabel: $title")
+                      .setContentText(bodyText)
+                      .setStyle(NotificationCompat.BigTextStyle().bigText(bodyText))
+                      .setPriority(NotificationCompat.PRIORITY_HIGH)
+                      .addAction(android.R.drawable.ic_popup_reminder, "Snooze 15m", snoozePending)
+                      .setAutoCancel(true)
+                      .build()
+
+                  manager.notify(id, notification)
+
+                  // Auto-reschedule next week's occurrence if recurring
+                  if (recurringDays.isNotBlank() && alertLabel == "in 2 Hours") {
+                      val pendingResult = goAsync()
+                      CoroutineScope(Dispatchers.IO).launch {
+                          try {
+                              val nextEventTime = AlarmScheduler.computeNextRecurringMillis(
+                                  hour = hour,
+                                  minute = minute,
+                                  recurringDaysCsv = recurringDays,
+                                  afterTimeMillis = currentEventMillis + 60_000L
+                              )
+                              val dao = AppDatabase.get(context).dao()
+                              val activeItems = dao.getActiveItemsSync()
+                              val currentItem = activeItems.find { it.id == id }
+                              if (currentItem != null) {
+                                  val updated = currentItem.copy(eventTimeMillis = nextEventTime)
+                                  dao.update(updated)
+                                  AlarmScheduler.scheduleReminders(context, updated)
+                              }
+                          } finally {
+                              pendingResult.finish()
+                          }
+                      }
+                  }
+              }
+          }
+
+          class BootCompletedReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  val validActions = setOf(
+                      Intent.ACTION_BOOT_COMPLETED,
+                      Intent.ACTION_LOCKED_BOOT_COMPLETED,
+                      "android.intent.action.QUICKBOOT_POWERON",
+                      Intent.ACTION_MY_PACKAGE_REPLACED
+                  )
+                  if (intent.action !in validActions) return
+
+                  val pendingResult = goAsync()
+                  CoroutineScope(Dispatchers.IO).launch {
+                      try {
+                          val dao = AppDatabase.get(context).dao()
+                          val activeItems = dao.getActiveItemsSync()
+                          val now = System.currentTimeMillis()
+
+                          activeItems.forEach { item ->
+                              if (item.recurringDays.isNotBlank()) {
+                                  val nextOccurrence = AlarmScheduler.computeNextRecurringMillis(
+                                      hour = item.hour,
+                                      minute = item.minute,
+                                      recurringDaysCsv = item.recurringDays,
+                                      afterTimeMillis = now
+                                  )
+                                  val updatedItem = item.copy(eventTimeMillis = nextOccurrence)
+                                  dao.update(updatedItem)
+                                  AlarmScheduler.scheduleReminders(context, updatedItem)
+                              } else if (item.eventTimeMillis > now) {
+                                  AlarmScheduler.scheduleReminders(context, item)
+                              }
+                          }
+                      } finally {
+                          pendingResult.finish()
+                      }
+                  }
+              }
+          }
+
+          object AlarmScheduler {
+              private const val TWO_HOURS_MILLIS = 2 * 60 * 60 * 1000L
+              private const val FIFTEEN_MIN_MILLIS = 15 * 60 * 1000L
+
+              fun computeNextRecurringMillis(
+                  hour: Int,
+                  minute: Int,
+                  recurringDaysCsv: String,
+                  afterTimeMillis: Long = System.currentTimeMillis()
+              ): Long {
+                  val activeDays = recurringDaysCsv.split(",")
+                      .mapNotNull { it.trim().toIntOrNull() }
+                      .toSet()
+
+                  if (activeDays.isEmpty()) return afterTimeMillis
+
+                  val cal = Calendar.getInstance().apply {
+                      timeInMillis = afterTimeMillis
+                      set(Calendar.HOUR_OF_DAY, hour)
+                      set(Calendar.MINUTE, minute)
+                      set(Calendar.SECOND, 0)
+                      set(Calendar.MILLISECOND, 0)
+                  }
+
+                  for (offset in 0..7) {
+                      val candidate = (cal.clone() as Calendar).apply {
+                          add(Calendar.DAY_OF_YEAR, offset)
+                      }
+                      val dayOfWeek = candidate.get(Calendar.DAY_OF_WEEK)
+                      if (dayOfWeek in activeDays && candidate.timeInMillis > afterTimeMillis) {
+                          return candidate.timeInMillis
+                      }
+                  }
+                  return cal.timeInMillis + 7 * 24 * 3600 * 1000L
+              }
+
+              fun scheduleReminders(context: Context, item: ScheduleItem) {
+                  val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+                  val targetEventMillis = if (item.recurringDays.isNotBlank()) {
+                      computeNextRecurringMillis(item.hour, item.minute, item.recurringDays)
+                  } else {
+                      item.eventTimeMillis
+                  }
+
+                  // 1. Primary 2-Hour Prior Reminder (RequestCode = id * 10 + 1)
+                  scheduleSingleAlarm(
+                      context = context,
+                      alarmManager = alarmManager,
+                      requestCode = item.id * 10 + 1,
+                      item = item,
+                      targetEventMillis = targetEventMillis,
+                      triggerMillis = targetEventMillis - TWO_HOURS_MILLIS,
+                      alertLabel = "in 2 Hours",
+                      enabled = item.isReminderActive
+                  )
+
+                  // 2. Secondary 15-Minute Prior Heads-Up (RequestCode = id * 10 + 2)
+                  scheduleSingleAlarm(
+                      context = context,
+                      alarmManager = alarmManager,
+                      requestCode = item.id * 10 + 2,
+                      item = item,
+                      targetEventMillis = targetEventMillis,
+                      triggerMillis = targetEventMillis - FIFTEEN_MIN_MILLIS,
+                      alertLabel = "in 15 Mins",
+                      enabled = item.isReminderActive && item.alert15MinPrior
+                  )
+              }
+
+              private fun scheduleSingleAlarm(
+                  context: Context,
+                  alarmManager: AlarmManager,
+                  requestCode: Int,
+                  item: ScheduleItem,
+                  targetEventMillis: Long,
+                  triggerMillis: Long,
+                  alertLabel: String,
+                  enabled: Boolean
+              ) {
+                  val intent = Intent(context, ReminderReceiver::class.java).apply {
+                      putExtra("ID", item.id)
+                      putExtra("TITLE", item.title)
+                      putExtra("CATEGORY", item.category)
+                      putExtra("LOCATION", item.location)
+                      putExtra("NOTES", item.notes)
+                      putExtra("ALERT_LABEL", alertLabel)
+                      putExtra("HOUR", item.hour)
+                      putExtra("MINUTE", item.minute)
+                      putExtra("RECURRING_DAYS", item.recurringDays)
+                      putExtra("EVENT_TIME", targetEventMillis)
+                  }
+
+                  val pendingIntent = PendingIntent.getBroadcast(
+                      context,
+                      requestCode,
+                      intent,
+                      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                  )
+
+                  if (!enabled) {
+                      alarmManager.cancel(pendingIntent)
+                      return
+                  }
+
+                  val now = System.currentTimeMillis()
+                  val finalTrigger = if (triggerMillis <= now && targetEventMillis > now && alertLabel == "in 2 Hours") {
+                      now + 5_000L
+                  } else {
+                      triggerMillis
+                  }
+
+                  if (finalTrigger > now) {
+                      alarmManager.setExactAndAllowWhileIdle(
+                          AlarmManager.RTC_WAKEUP,
+                          finalTrigger,
+                          pendingIntent
+                      )
+                  }
+              }
+
+              fun scheduleSnooze(
+                  context: Context,
+                  id: Int,
+                  title: String,
+                  category: String,
+                  location: String,
+                  notes: String
+              ) {
+                  val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                  val triggerAt = System.currentTimeMillis() + FIFTEEN_MIN_MILLIS
+                  val intent = Intent(context, ReminderReceiver::class.java).apply {
+                      putExtra("ID", id)
+                      putExtra("TITLE", title)
+                      putExtra("CATEGORY", category)
+                      putExtra("LOCATION", location)
+                      putExtra("NOTES", notes)
+                      putExtra("ALERT_LABEL", "Snoozed Alert")
+                  }
+                  val pending = PendingIntent.getBroadcast(
+                      context,
+                      id * 100 + 88,
+                      intent,
+                      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                  )
+                  alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+              }
+          }
+
+          // --- 3. MAIN ACTIVITY & 4-TAB SAMSUNG CLOCK UI ---
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
+                  }
+                  val db = AppDatabase.get(this)
+
+                  setContent {
+                      MaterialTheme(
+                          colorScheme = darkColorScheme(
+                              background = Color(0xFF000000),
+                              surface = Color(0xFF1C1C1E),
+                              primary = Color(0xFF387AFF),
+                              onBackground = Color.White,
+                              onSurface = Color.White
+                          )
+                      ) {
+                          OneUiProApp(db.dao())
+                      }
+                  }
+              }
+          }
+
+          val ALL_CATEGORIES = listOf(
+              "All", "AUV Tech Team", "Makerspace", "Aeromodelling",
+              "IITB Meetings", "Classes & Labs", "Orientations", "Tasks"
+          )
+
+          val IITB_VENUES = listOf(
+              "AUV Lab", "Makerspace", "Hostel 16", "LA 201",
+              "LHC", "Tinkerers' Lab", "Gymkhana", "Convocation Hall"
+          )
+
+          @Composable
+          fun OneUiProApp(dao: ScheduleDao) {
+              val context = LocalContext.current
+              val scope = rememberCoroutineScope()
+              val allItems by dao.getAllItems().collectAsState(initial = emptyList())
+
+              var currentTab by remember { mutableStateOf(0) }
+              var editingItem by remember { mutableStateOf<ScheduleItem?>(null) }
+              var showAddOrEditDialog by remember { mutableStateOf(false) }
+
+              Scaffold(
+                  containerColor = Color.Black,
+                  floatingActionButton = {
+                      if (currentTab == 0 || currentTab == 1) {
+                          FloatingActionButton(
+                              onClick = {
+                                  editingItem = null
+                                  showAddOrEditDialog = true
+                              },
+                              containerColor = Color(0xFF387AFF),
+                              contentColor = Color.White,
+                              shape = CircleShape
+                          ) {
+                              Icon(Icons.Default.Add, contentDescription = "Add Event")
+                          }
+                      }
+                  },
+                  bottomBar = {
+                      NavigationBar(
+                          containerColor = Color(0xFF121214),
+                          contentColor = Color.White
+                      ) {
+                          NavigationBarItem(
+                              selected = currentTab == 0,
+                              onClick = { currentTab = 0 },
+                              icon = { Icon(Icons.Default.Schedule, contentDescription = null) },
+                              label = { Text("Schedule") }
+                          )
+                          NavigationBarItem(
+                              selected = currentTab == 1,
+                              onClick = { currentTab = 1 },
+                              icon = { Icon(Icons.Default.CheckCircle, contentDescription = null) },
+                              label = { Text("Tasks") }
+                          )
+                          NavigationBarItem(
+                              selected = currentTab == 2,
+                              onClick = { currentTab = 2 },
+                              icon = { Icon(Icons.Default.PlayArrow, contentDescription = null) },
+                              label = { Text("Focus & Lab") }
+                          )
+                          NavigationBarItem(
+                              selected = currentTab == 3,
+                              onClick = { currentTab = 3 },
+                              icon = { Icon(Icons.Default.Share, contentDescription = null) },
+                              label = { Text("Sync & Stats") }
+                          )
+                      }
+                  }
+              ) { padding ->
+                  Box(
+                      modifier = Modifier
+                          .fillMaxSize()
+                          .padding(padding)
+                  ) {
+                      when (currentTab) {
+                          0 -> ScheduleTabScreen(
+                              allItems = allItems,
+                              onEdit = { item ->
+                                  editingItem = item
+                                  showAddOrEditDialog = true
+                              },
+                              onToggleActive = { item, enabled ->
+                                  scope.launch {
+                                      val updated = item.copy(isReminderActive = enabled)
+                                      dao.update(updated)
+                                      AlarmScheduler.scheduleReminders(context, updated)
+                                  }
+                              },
+                              onTogglePin = { item ->
+                                  scope.launch {
+                                      dao.update(item.copy(isPinned = !item.isPinned))
+                                  }
+                              },
+                              onDelete = { item ->
+                                  scope.launch {
+                                      AlarmScheduler.scheduleReminders(context, item.copy(isReminderActive = false))
+                                      dao.delete(item)
+                                  }
+                              }
+                          )
+                          1 -> TasksChecklistScreen(
+                              allItems = allItems,
+                              onToggleComplete = { item ->
+                                  scope.launch {
+                                      val completed = !item.isCompleted
+                                      val updated = item.copy(
+                                          isCompleted = completed,
+                                          isReminderActive = if (completed) false else item.isReminderActive
+                                      )
+                                      dao.update(updated)
+                                      AlarmScheduler.scheduleReminders(context, updated)
+                                  }
+                              },
+                              onClearCompleted = {
+                                  scope.launch { dao.deleteCompleted() }
+                              },
+                              onEdit = { item ->
+                                  editingItem = item
+                                  showAddOrEditDialog = true
+                              }
+                          )
+                          2 -> FocusAndStopwatchScreen()
+                          3 -> StatsAndBackupScreen(
+                              allItems = allItems,
+                              onImportItems = { importedList ->
+                                  scope.launch {
+                                      importedList.forEach { item ->
+                                          val newId = dao.insert(item.copy(id = 0)).toInt()
+                                          AlarmScheduler.scheduleReminders(context, item.copy(id = newId))
+                                      }
+                                      Toast.makeText(context, "Imported ${importedList.size} events!", Toast.LENGTH_SHORT).show()
+                                  }
+                              }
+                          )
+                      }
+                  }
+
+                  if (showAddOrEditDialog) {
+                      AddOrEditScheduleDialog(
+                          initialItem = editingItem,
+                          categories = ALL_CATEGORIES.drop(1),
+                          onDismiss = { showAddOrEditDialog = false },
+                          onSave = { savedItem ->
+                              scope.launch {
+                                  if (editingItem == null) {
+                                      val newId = dao.insert(savedItem).toInt()
+                                      AlarmScheduler.scheduleReminders(context, savedItem.copy(id = newId))
+                                  } else {
+                                      dao.update(savedItem)
+                                      AlarmScheduler.scheduleReminders(context, savedItem)
+                                  }
+                                  showAddOrEditDialog = false
+                              }
+                          }
+                      )
+                  }
+              }
+          }
+
+          // --- TAB 0: SAMSUNG CLOCK SCHEDULE SCREEN ---
+          @Composable
+          fun ScheduleTabScreen(
+              allItems: List<ScheduleItem>,
+              onEdit: (ScheduleItem) -> Unit,
+              onToggleActive: (ScheduleItem, Boolean) -> Unit,
+              onTogglePin: (ScheduleItem) -> Unit,
+              onDelete: (ScheduleItem) -> Unit
+          ) {
+              var selectedCategory by remember { mutableStateOf("All") }
+              var searchQuery by remember { mutableStateOf("") }
+
+              val filteredItems = remember(allItems, selectedCategory, searchQuery) {
+                  allItems.filter { item ->
+                      val matchesCat = selectedCategory == "All" || item.category == selectedCategory
+                      val matchesSearch = searchQuery.isBlank() ||
+                          item.title.contains(searchQuery, ignoreCase = true) ||
+                          item.location.contains(searchQuery, ignoreCase = true) ||
+                          item.notes.contains(searchQuery, ignoreCase = true)
+                      matchesCat && matchesSearch
+                  }
+              }
+
+              val nextUpcoming = remember(allItems) {
+                  val now = System.currentTimeMillis()
+                  allItems
+                      .filter { it.isReminderActive && !it.isCompleted }
+                      .map { item ->
+                          val effectiveTime = if (item.recurringDays.isNotBlank()) {
+                              AlarmScheduler.computeNextRecurringMillis(item.hour, item.minute, item.recurringDays, now)
+                          } else {
+                              item.eventTimeMillis
+                          }
+                          item.copy(eventTimeMillis = effectiveTime)
+                      }
+                      .filter { it.eventTimeMillis > now }
+                      .minByOrNull { it.eventTimeMillis }
+              }
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .padding(horizontal = 16.dp)
+              ) {
+                  // Samsung Clock Countdown Header
+                  Box(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(top = 24.dp, bottom = 18.dp),
+                      contentAlignment = Alignment.Center
+                  ) {
+                      Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                          if (nextUpcoming != null) {
+                              val diffMin = ((nextUpcoming.eventTimeMillis - System.currentTimeMillis()) / 60000).coerceAtLeast(0)
+                              val days = diffMin / (60 * 24)
+                              val hrs = (diffMin % (60 * 24)) / 60
+                              val mins = diffMin % 60
+                              val timeText = if (days > 0) "Next in ${days}d ${hrs}h ${mins}m" else "Next in ${hrs}h ${mins}m"
+
+                              Text(
+                                  text = timeText,
+                                  fontSize = 28.sp,
+                                  fontWeight = FontWeight.Light,
+                                  color = Color.White
+                              )
+                              Spacer(modifier = Modifier.height(4.dp))
+                              Text(
+                                  text = "${nextUpcoming.title} • ${nextUpcoming.location}",
+                                  fontSize = 14.sp,
+                                  color = Color(0xFF387AFF),
+                                  fontWeight = FontWeight.Medium
+                              )
+                          } else {
+                              Text(
+                                  text = "All Caught Up",
+                                  fontSize = 28.sp,
+                                  fontWeight = FontWeight.Light,
+                                  color = Color.White
+                              )
+                              Text(
+                                  text = "2-hour & 15-min offline reminders armed",
+                                  fontSize = 13.sp,
+                                  color = Color.Gray
+                              )
+                          }
+                      }
+                  }
+
+                  // Search Bar
+                  OutlinedTextField(
+                      value = searchQuery,
+                      onValueChange = { searchQuery = it },
+                      placeholder = { Text("Search AUV, Makerspace, venue, or notes...", fontSize = 13.sp) },
+                      leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color.Gray) },
+                      trailingIcon = {
+                          if (searchQuery.isNotEmpty()) {
+                              IconButton(onClick = { searchQuery = "" }) {
+                                  Icon(Icons.Default.Close, contentDescription = "Clear", tint = Color.Gray)
+                              }
+                          }
+                      },
+                      singleLine = true,
+                      shape = RoundedCornerShape(50),
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(bottom = 12.dp)
+                  )
+
+                  // Category Filter Pills
+                  Row(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .horizontalScroll(rememberScrollState())
+                          .padding(bottom = 14.dp),
+                      horizontalArrangement = Arrangement.spacedBy(8.dp)
+                  ) {
+                      ALL_CATEGORIES.forEach { category ->
+                          val isSelected = category == selectedCategory
+                          val bg by animateColorAsState(if (isSelected) Color(0xFF387AFF) else Color(0xFF1C1C1E))
+                          Box(
+                              modifier = Modifier
+                                  .clip(RoundedCornerShape(50))
+                                  .background(bg)
+                                  .clickable { selectedCategory = category }
+                                  .padding(horizontal = 16.dp, vertical = 8.dp)
+                          ) {
+                              Text(text = category, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                          }
+                      }
+                  }
+
+                  LazyColumn(
+                      verticalArrangement = Arrangement.spacedBy(12.dp),
+                      contentPadding = PaddingValues(bottom = 90.dp)
+                  ) {
+                      items(filteredItems, key = { it.id }) { item ->
+                          OneUiScheduleCard(
+                              item = item,
+                              onClick = { onEdit(item) },
+                              onToggle = { enabled -> onToggleActive(item, enabled) },
+                              onPin = { onTogglePin(item) },
+                              onDelete = { onDelete(item) }
+                          )
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun OneUiScheduleCard(
+              item: ScheduleItem,
+              onClick: () -> Unit,
+              onToggle: (Boolean) -> Unit,
+              onPin: () -> Unit,
+              onDelete: () -> Unit
+          ) {
+              val timeFormatter = remember { SimpleDateFormat("hh:mm a", Locale.getDefault()) }
+              val dateFormatter = remember { SimpleDateFormat("EEE, dd MMM", Locale.getDefault()) }
+              val textAlpha = if (item.isReminderActive && !item.isCompleted) 1f else 0.45f
+
+              val priorityColor = when (item.priority) {
+                  "Urgent" -> Color(0xFFFF453A)
+                  "High" -> Color(0xFFFF9F0A)
+                  else -> Color(0xFF387AFF)
+              }
+
+              val activeRecurringSet = remember(item.recurringDays) {
+                  item.recurringDays.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
+              }
+              val weekDays = listOf(
+                  1 to "S", 2 to "M", 3 to "T", 4 to "W", 5 to "T", 6 to "F", 7 to "S"
+              )
+
+              Surface(
+                  shape = RoundedCornerShape(26.dp),
+                  color = Color(0xFF1C1C1E),
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .border(
+                          width = if (item.isPinned) 1.5.dp else 0.dp,
+                          color = if (item.isPinned) priorityColor.copy(alpha = 0.7f) else Color.Transparent,
+                          shape = RoundedCornerShape(26.dp)
+                      )
+                      .clickable { onClick() }
+              ) {
+                  Row(
+                      modifier = Modifier
+                          .padding(horizontal = 18.dp, vertical = 16.dp)
+                          .fillMaxWidth(),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.SpaceBetween
+                  ) {
+                      Column(modifier = Modifier.weight(1f)) {
+                          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                              Box(
+                                  modifier = Modifier
+                                      .size(8.dp)
+                                      .clip(CircleShape)
+                                      .background(priorityColor)
+                              )
+                              Text(
+                                  text = "${item.category} • ${item.location}",
+                                  color = priorityColor.copy(alpha = textAlpha),
+                                  fontSize = 12.sp,
+                                  fontWeight = FontWeight.SemiBold
+                              )
+                              if (item.priority != "Normal") {
+                                  Text(
+                                      text = "[${item.priority}]",
+                                      color = priorityColor.copy(alpha = textAlpha),
+                                      fontSize = 11.sp,
+                                      fontWeight = FontWeight.Bold
+                                  )
+                              }
+                          }
+
+                          Spacer(modifier = Modifier.height(4.dp))
+                          Text(
+                              text = timeFormatter.format(Date(item.eventTimeMillis)),
+                              color = Color.White.copy(alpha = textAlpha),
+                              fontSize = 28.sp,
+                              fontWeight = FontWeight.Light
+                          )
+                          Text(
+                              text = item.title,
+                              color = Color.White.copy(alpha = textAlpha),
+                              fontSize = 16.sp,
+                              fontWeight = FontWeight.Medium,
+                              textDecoration = if (item.isCompleted) TextDecoration.LineThrough else TextDecoration.None
+                          )
+
+                          if (item.notes.isNotBlank()) {
+                              Text(
+                                  text = item.notes,
+                                  color = Color.LightGray.copy(alpha = 0.75f * textAlpha),
+                                  fontSize = 12.sp,
+                                  maxLines = 2,
+                                  overflow = TextOverflow.Ellipsis,
+                                  modifier = Modifier.padding(top = 2.dp)
+                              )
+                          }
+
+                          Spacer(modifier = Modifier.height(6.dp))
+
+                          val alertBadge = if (item.alert15MinPrior) "2h + 15m alerts" else "2h alert"
+                          if (activeRecurringSet.isNotEmpty()) {
+                              Row(
+                                  horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  weekDays.forEach { (dayNum, label) ->
+                                      val isDaySelected = dayNum in activeRecurringSet
+                                      Text(
+                                          text = label,
+                                          fontSize = 12.sp,
+                                          fontWeight = if (isDaySelected) FontWeight.Bold else FontWeight.Normal,
+                                          color = when {
+                                              isDaySelected -> Color(0xFF387AFF).copy(alpha = textAlpha)
+                                              dayNum == 1 -> Color(0xFFFF453A).copy(alpha = 0.5f * textAlpha)
+                                              else -> Color.Gray.copy(alpha = 0.5f * textAlpha)
+                                          }
+                                      )
+                                  }
+                                  Text(
+                                      text = " • $alertBadge",
+                                      color = Color.Gray.copy(alpha = textAlpha),
+                                      fontSize = 11.sp
+                                  )
+                              }
+                          } else {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Icon(
+                                      Icons.Default.NotificationsActive,
+                                      contentDescription = null,
+                                      tint = Color.Gray.copy(alpha = textAlpha),
+                                      modifier = Modifier.size(13.dp)
+                                  )
+                                  Spacer(modifier = Modifier.width(4.dp))
+                                  Text(
+                                      text = "${dateFormatter.format(Date(item.eventTimeMillis))} • $alertBadge",
+                                      color = Color.Gray.copy(alpha = textAlpha),
+                                      fontSize = 12.sp
+                                  )
+                              }
+                          }
+                      }
+
+                      Column(horizontalAlignment = Alignment.End) {
+                          Switch(
+                              checked = item.isReminderActive,
+                              onCheckedChange = onToggle,
+                              colors = SwitchDefaults.colors(
+                                  checkedThumbColor = Color.White,
+                                  checkedTrackColor = Color(0xFF387AFF)
+                              )
+                          )
+                          Row {
+                              IconButton(onClick = onPin, modifier = Modifier.size(32.dp)) {
+                                  Icon(
+                                      Icons.Default.Star,
+                                      contentDescription = "Pin",
+                                      tint = if (item.isPinned) Color(0xFFFFD60A) else Color.DarkGray,
+                                      modifier = Modifier.size(18.dp)
+                                  )
+                              }
+                              IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                                  Icon(
+                                      Icons.Default.Delete,
+                                      contentDescription = "Delete",
+                                      tint = Color.Gray,
+                                      modifier = Modifier.size(18.dp)
+                                  )
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // --- TAB 1: TASKS & SUB-CHECKLIST SCREEN ---
+          @Composable
+          fun TasksChecklistScreen(
+              allItems: List<ScheduleItem>,
+              onToggleComplete: (ScheduleItem) -> Unit,
+              onClearCompleted: () -> Unit,
+              onEdit: (ScheduleItem) -> Unit
+          ) {
+              val completedCount = allItems.count { it.isCompleted }
+              val totalCount = allItems.size
+              val progress = if (totalCount > 0) completedCount.toFloat() / totalCount else 0f
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .padding(horizontal = 16.dp, vertical = 20.dp)
+              ) {
+                  Row(
+                      modifier = Modifier.fillMaxWidth(),
+                      horizontalArrangement = Arrangement.SpaceBetween,
+                      verticalAlignment = Alignment.CenterVertically
+                  ) {
+                      Column {
+                          Text("Tasks & Checklist", fontSize = 24.sp, fontWeight = FontWeight.Light, color = Color.White)
+                          Text("$completedCount of $totalCount completed", fontSize = 13.sp, color = Color.Gray)
+                      }
+                      if (completedCount > 0) {
+                          TextButton(onClick = onClearCompleted) {
+                              Text("Clear Done", color = Color(0xFFFF453A))
+                          }
+                      }
+                  }
+
+                  Spacer(modifier = Modifier.height(12.dp))
+                  LinearProgressIndicator(
+                      progress = { progress },
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .height(8.dp)
+                          .clip(RoundedCornerShape(50)),
+                      color = Color(0xFF387AFF),
+                      trackColor = Color(0xFF1C1C1E)
+                  )
+                  Spacer(modifier = Modifier.height(18.dp))
+
+                  LazyColumn(
+                      verticalArrangement = Arrangement.spacedBy(10.dp),
+                      contentPadding = PaddingValues(bottom = 90.dp)
+                  ) {
+                      items(allItems, key = { it.id }) { item ->
+                          Surface(
+                              shape = RoundedCornerShape(20.dp),
+                              color = Color(0xFF1C1C1E),
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .clickable { onEdit(item) }
+                          ) {
+                              Row(
+                                  modifier = Modifier.padding(16.dp),
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  Checkbox(
+                                      checked = item.isCompleted,
+                                      onCheckedChange = { onToggleComplete(item) }
+                                  )
+                                  Spacer(modifier = Modifier.width(8.dp))
+                                  Column(modifier = Modifier.weight(1f)) {
+                                      Text(
+                                          text = item.title,
+                                          color = if (item.isCompleted) Color.Gray else Color.White,
+                                          fontSize = 16.sp,
+                                          fontWeight = FontWeight.Medium,
+                                          textDecoration = if (item.isCompleted) TextDecoration.LineThrough else TextDecoration.None
+                                      )
+                                      Text(
+                                          text = "${item.category} • ${item.location} • ${item.priority} Priority",
+                                          color = Color(0xFF387AFF),
+                                          fontSize = 12.sp
+                                      )
+                                      if (item.notes.isNotBlank()) {
+                                          Text(text = item.notes, color = Color.Gray, fontSize = 12.sp, maxLines = 1)
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // --- TAB 2: SAMSUNG CLOCK FOCUS TIMER & LAB STOPWATCH ---
+          @Composable
+          fun FocusAndStopwatchScreen() {
+              var selectedDurationSec by remember { mutableStateOf(25 * 60) }
+              var remainingSec by remember { mutableStateOf(25 * 60) }
+              var isTimerRunning by remember { mutableStateOf(false) }
+
+              var stopwatchMillis by remember { mutableStateOf(0L) }
+              var isStopwatchRunning by remember { mutableStateOf(false) }
+              val laps = remember { mutableStateListOf<String>() }
+
+              LaunchedEffect(isTimerRunning) {
+                  while (isTimerRunning && remainingSec > 0) {
+                      delay(1000L)
+                      remainingSec--
+                  }
+                  if (remainingSec == 0) isTimerRunning = false
+              }
+
+              LaunchedEffect(isStopwatchRunning) {
+                  while (isStopwatchRunning) {
+                      delay(100L)
+                      stopwatchMillis += 100L
+                  }
+              }
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .verticalScroll(rememberScrollState())
+                      .padding(16.dp),
+                  verticalArrangement = Arrangement.spacedBy(18.dp)
+              ) {
+                  // 1. Focus / Pomodoro Timer Card
+                  Surface(
+                      shape = RoundedCornerShape(28.dp),
+                      color = Color(0xFF1C1C1E),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Column(
+                          modifier = Modifier.padding(24.dp),
+                          horizontalAlignment = Alignment.CenterHorizontally
+                      ) {
+                          Text("Focus & Coding Timer", color = Color(0xFF387AFF), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                          Spacer(modifier = Modifier.height(10.dp))
+
+                          val mins = remainingSec / 60
+                          val secs = remainingSec % 60
+                          Text(
+                              text = String.format("%02d:%02d", mins, secs),
+                              fontSize = 52.sp,
+                              fontWeight = FontWeight.Light,
+                              color = Color.White
+                          )
+
+                          Spacer(modifier = Modifier.height(12.dp))
+                          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              listOf(25 to "25m Study", 50 to "50m CAD/Code", 90 to "90m Lab").forEach { (m, label) ->
+                                  FilterChip(
+                                      selected = selectedDurationSec == m * 60,
+                                      onClick = {
+                                          isTimerRunning = false
+                                          selectedDurationSec = m * 60
+                                          remainingSec = m * 60
+                                      },
+                                      label = { Text(label, fontSize = 12.sp) }
+                                  )
+                              }
+                          }
+
+                          Spacer(modifier = Modifier.height(14.dp))
+                          Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                              Button(
+                                  onClick = { isTimerRunning = !isTimerRunning },
+                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF387AFF))
+                              ) {
+                                  Text(if (isTimerRunning) "Pause" else "Start Focus")
+                              }
+                              OutlinedButton(
+                                  onClick = {
+                                      isTimerRunning = false
+                                      remainingSec = selectedDurationSec
+                                  }
+                              ) {
+                                  Text("Reset")
+                              }
+                          }
+                      }
+                  }
+
+                  // 2. Lab / Testing Stopwatch Card
+                  Surface(
+                      shape = RoundedCornerShape(28.dp),
+                      color = Color(0xFF1C1C1E),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Column(
+                          modifier = Modifier.padding(24.dp),
+                          horizontalAlignment = Alignment.CenterHorizontally
+                      ) {
+                          Text("Lab & Run Stopwatch", color = Color(0xFF387AFF), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                          Spacer(modifier = Modifier.height(10.dp))
+
+                          val totalSec = stopwatchMillis / 1000
+                          val m = totalSec / 60
+                          val s = totalSec % 60
+                          val tenth = (stopwatchMillis % 1000) / 100
+                          Text(
+                              text = String.format("%02d:%02d.%d", m, s, tenth),
+                              fontSize = 46.sp,
+                              fontWeight = FontWeight.Light,
+                              color = Color.White
+                          )
+
+                          Spacer(modifier = Modifier.height(14.dp))
+                          Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                              Button(
+                                  onClick = { isStopwatchRunning = !isStopwatchRunning },
+                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF387AFF))
+                              ) {
+                                  Text(if (isStopwatchRunning) "Stop" else "Start")
+                              }
+                              OutlinedButton(
+                                  onClick = {
+                                      if (stopwatchMillis > 0L) {
+                                          laps.add(0, "Lap ${laps.size + 1}: " + String.format("%02d:%02d.%d", m, s, tenth))
+                                      }
+                                  }
+                              ) {
+                                  Text("Lap")
+                              }
+                              OutlinedButton(
+                                  onClick = {
+                                      isStopwatchRunning = false
+                                      stopwatchMillis = 0L
+                                      laps.clear()
+                                  }
+                              ) {
+                                  Text("Reset")
+                              }
+                          }
+
+                          if (laps.isNotEmpty()) {
+                              Spacer(modifier = Modifier.height(12.dp))
+                              laps.take(5).forEach { lap ->
+                                  Text(lap, color = Color.LightGray, fontSize = 13.sp)
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // --- TAB 3: ANALYTICS & OFFLINE CLIPBOARD JSON SYNC ---
+          @Composable
+          fun StatsAndBackupScreen(
+              allItems: List<ScheduleItem>,
+              onImportItems: (List<ScheduleItem>) -> Unit
+          ) {
+              val context = LocalContext.current
+              val clipboard = LocalClipboardManager.current
+              var importJsonText by remember { mutableStateOf("") }
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .verticalScroll(rememberScrollState())
+                      .padding(16.dp),
+                  verticalArrangement = Arrangement.spacedBy(16.dp)
+              ) {
+                  Text("Schedule Analytics & Sync", fontSize = 24.sp, fontWeight = FontWeight.Light, color = Color.White)
+
+                  // Quick Stats Row
+                  Row(
+                      modifier = Modifier.fillMaxWidth(),
+                      horizontalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                      StatBox("Active", allItems.count { it.isReminderActive && !it.isCompleted }.toString(), Modifier.weight(1f))
+                      StatBox("Pinned", allItems.count { it.isPinned }.toString(), Modifier.weight(1f))
+                      StatBox("Done", allItems.count { it.isCompleted }.toString(), Modifier.weight(1f))
+                  }
+
+                  // Category Breakdown Card
+                  Surface(
+                      shape = RoundedCornerShape(24.dp),
+                      color = Color(0xFF1C1C1E),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          Text("Category Breakdown", color = Color(0xFF387AFF), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                          ALL_CATEGORIES.drop(1).forEach { cat ->
+                              val count = allItems.count { it.category == cat }
+                              Row(
+                                  modifier = Modifier.fillMaxWidth(),
+                                  horizontalArrangement = Arrangement.SpaceBetween
+                              ) {
+                                  Text(cat, color = Color.LightGray, fontSize = 14.sp)
+                                  Text("$count items", color = Color.White, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                              }
+                          }
+                      }
+                  }
+
+                  // Offline JSON Backup & Restore Card
+                  Surface(
+                      shape = RoundedCornerShape(24.dp),
+                      color = Color(0xFF1C1C1E),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                          Text("Offline Backup & Laptop Sync", color = Color(0xFF387AFF), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                          Text(
+                              "Copy your entire schedule as JSON to back it up offline or transfer between devices.",
+                              color = Color.Gray,
+                              fontSize = 12.sp
+                          )
+                          Button(
+                              onClick = {
+                                  val arr = JSONArray()
+                                  allItems.forEach { item ->
+                                      arr.put(JSONObject().apply {
+                                          put("title", item.title)
+                                          put("category", item.category)
+                                          put("location", item.location)
+                                          put("notes", item.notes)
+                                          put("priority", item.priority)
+                                          put("eventTimeMillis", item.eventTimeMillis)
+                                          put("hour", item.hour)
+                                          put("minute", item.minute)
+                                          put("recurringDays", item.recurringDays)
+                                      })
+                                  }
+                                  clipboard.setText(AnnotatedString(arr.toString()))
+                                  Toast.makeText(context, "Schedule JSON copied to clipboard!", Toast.LENGTH_SHORT).show()
+                              },
+                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF387AFF)),
+                              modifier = Modifier.fillMaxWidth()
+                          ) {
+                              Text("Copy Backup JSON to Clipboard")
+                          }
+
+                          OutlinedTextField(
+                              value = importJsonText,
+                              onValueChange = { importJsonText = it },
+                              label = { Text("Paste Backup JSON Here to Restore") },
+                              maxLines = 3,
+                              modifier = Modifier.fillMaxWidth()
+                          )
+
+                          OutlinedButton(
+                              onClick = {
+                                  try {
+                                      val arr = JSONArray(importJsonText.trim())
+                                      val list = mutableListOf<ScheduleItem>()
+                                      for (i in 0 until arr.length()) {
+                                          val obj = arr.getJSONObject(i)
+                                          list.add(
+                                              ScheduleItem(
+                                                  title = obj.optString("title", "Imported Event"),
+                                                  category = obj.optString("category", "Daily Schedule"),
+                                                  location = obj.optString("location", "IITB Campus"),
+                                                  notes = obj.optString("notes", ""),
+                                                  priority = obj.optString("priority", "Normal"),
+                                                  eventTimeMillis = obj.optLong("eventTimeMillis", System.currentTimeMillis() + 3600000L),
+                                                  hour = obj.optInt("hour", 12),
+                                                  minute = obj.optInt("minute", 0),
+                                                  recurringDays = obj.optString("recurringDays", "")
+                                              )
+                                          )
+                                      }
+                                      if (list.isNotEmpty()) {
+                                          onImportItems(list)
+                                          importJsonText = ""
+                                      }
+                                  } catch (e: Exception) {
+                                      Toast.makeText(context, "Invalid JSON format", Toast.LENGTH_SHORT).show()
+                                  }
+                              },
+                              modifier = Modifier.fillMaxWidth()
+                          ) {
+                              Text("Restore from JSON")
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun StatBox(label: String, value: String, modifier: Modifier = Modifier) {
+              Surface(
+                  shape = RoundedCornerShape(20.dp),
+                  color = Color(0xFF1C1C1E),
+                  modifier = modifier
+              ) {
+                  Column(
+                      modifier = Modifier.padding(vertical = 16.dp),
+                      horizontalAlignment = Alignment.CenterHorizontally
+                  ) {
+                      Text(value, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF387AFF))
+                      Text(label, fontSize = 12.sp, color = Color.Gray)
+                  }
+              }
+          }
+
+          // --- 4. ADD / EDIT DIALOG WITH IITB VENUE PRESETS, PRIORITY & MULTI-ALERTS ---
+          @Composable
+          fun AddOrEditScheduleDialog(
+              initialItem: ScheduleItem?,
+              categories: List<String>,
+              onDismiss: () -> Unit,
+              onSave: (ScheduleItem) -> Unit
+          ) {
+              var title by remember { mutableStateOf(initialItem?.title ?: "") }
+              var location by remember { mutableStateOf(initialItem?.location ?: "AUV Lab") }
+              var notes by remember { mutableStateOf(initialItem?.notes ?: "") }
+              var category by remember { mutableStateOf(initialItem?.category ?: categories.first()) }
+              var priority by remember { mutableStateOf(initialItem?.priority ?: "Normal") }
+              var alert15MinPrior by remember { mutableStateOf(initialItem?.alert15MinPrior ?: true) }
+              var isPinned by remember { mutableStateOf(initialItem?.isPinned ?: false) }
+
+              val initialCal = remember {
+                  Calendar.getInstance().apply {
+                      if (initialItem != null) timeInMillis = initialItem.eventTimeMillis
+                      else add(Calendar.HOUR_OF_DAY, 3)
+                  }
+              }
+              var selectedDateMillis by remember { mutableStateOf(initialCal.timeInMillis) }
+              var selectedHour by remember { mutableStateOf(initialItem?.hour ?: initialCal.get(Calendar.HOUR_OF_DAY)) }
+              var selectedMinute by remember { mutableStateOf(initialItem?.minute ?: initialCal.get(Calendar.MINUTE)) }
+
+              val selectedWeekDays = remember {
+                  mutableStateListOf<Int>().apply {
+                      initialItem?.recurringDays?.split(",")?.mapNotNull { it.trim().toIntOrNull() }?.let { addAll(it) }
+                  }
+              }
+              val weekDays = listOf(
+                  1 to "S", 2 to "M", 3 to "T", 4 to "W", 5 to "T", 6 to "F", 7 to "S"
+              )
+
+              var showDatePicker by remember { mutableStateOf(false) }
+              var showTimePicker by remember { mutableStateOf(false) }
+              val dateFormatter = remember { SimpleDateFormat("EEE, dd MMM yyyy", Locale.getDefault()) }
+
+              AlertDialog(
+                  onDismissRequest = onDismiss,
+                  containerColor = Color(0xFF1C1C1E),
+                  title = {
+                      Text(
+                          text = if (initialItem == null) "New IITB Schedule / Event" else "Edit Schedule Event",
+                          color = Color.White,
+                          fontWeight = FontWeight.SemiBold
+                      )
+                  },
+                  text = {
+                      Column(
+                          modifier = Modifier.verticalScroll(rememberScrollState()),
+                          verticalArrangement = Arrangement.spacedBy(10.dp)
+                      ) {
+                          OutlinedTextField(
+                              value = title,
+                              onValueChange = { title = it },
+                              label = { Text("Title (e.g., AUV Subsystem Sync)") },
+                              singleLine = true,
+                              modifier = Modifier.fillMaxWidth()
+                          )
+
+                          OutlinedTextField(
+                              value = location,
+                              onValueChange = { location = it },
+                              label = { Text("Venue") },
+                              singleLine = true,
+                              modifier = Modifier.fillMaxWidth()
+                          )
+
+                          // Quick IITB Venue Chips
+                          Row(
+                              modifier = Modifier.horizontalScroll(rememberScrollState()),
+                              horizontalArrangement = Arrangement.spacedBy(6.dp)
+                          ) {
+                              IITB_VENUES.forEach { venue ->
+                                  FilterChip(
+                                      selected = location == venue,
+                                      onClick = { location = venue },
+                                      label = { Text(venue, fontSize = 11.sp) }
+                                  )
+                              }
+                          }
+
+                          OutlinedTextField(
+                              value = notes,
+                              onValueChange = { notes = it },
+                              label = { Text("Agenda / Notes / Parts Needed") },
+                              maxLines = 2,
+                              modifier = Modifier.fillMaxWidth()
+                          )
+
+                          // Time & Calendar Date Pickers
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.spacedBy(8.dp)
+                          ) {
+                              OutlinedButton(
+                                  onClick = { showTimePicker = true },
+                                  modifier = Modifier.weight(1f),
+                                  shape = RoundedCornerShape(14.dp)
+                              ) {
+                                  Icon(Icons.Default.Schedule, contentDescription = null, modifier = Modifier.size(16.dp))
+                                  Spacer(modifier = Modifier.width(6.dp))
+                                  val amPm = if (selectedHour >= 12) "PM" else "AM"
+                                  val displayHr = if (selectedHour % 12 == 0) 12 else selectedHour % 12
+                                  Text(String.format("%02d:%02d %s", displayHr, selectedMinute, amPm))
+                              }
+
+                              OutlinedButton(
+                                  onClick = {
+                                      selectedWeekDays.clear()
+                                      showDatePicker = true
+                                  },
+                                  modifier = Modifier.weight(1f),
+                                  shape = RoundedCornerShape(14.dp)
+                              ) {
+                                  Icon(Icons.Default.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
+                                  Spacer(modifier = Modifier.width(6.dp))
+                                  Text(
+                                      text = if (selectedWeekDays.isEmpty()) dateFormatter.format(Date(selectedDateMillis)) else "Weekly",
+                                      maxLines = 1,
+                                      fontSize = 12.sp
+                                  )
+                              }
+                          }
+
+                          // S M T W T F S Weekly Selector
+                          Text("Repeat Weekly (Optional):", color = Color.Gray, fontSize = 12.sp)
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween
+                          ) {
+                              weekDays.forEach { (dayNum, label) ->
+                                  val isSelected = dayNum in selectedWeekDays
+                                  Box(
+                                      modifier = Modifier
+                                          .size(34.dp)
+                                          .clip(CircleShape)
+                                          .background(if (isSelected) Color(0xFF387AFF) else Color.Transparent)
+                                          .border(
+                                              width = 1.dp,
+                                              color = if (isSelected) Color(0xFF387AFF) else Color(0xFF3A3A3C),
+                                              shape = CircleShape
+                                          )
+                                          .clickable {
+                                              if (isSelected) selectedWeekDays.remove(dayNum)
+                                              else selectedWeekDays.add(dayNum)
+                                          },
+                                      contentAlignment = Alignment.Center
+                                  ) {
+                                      Text(
+                                          text = label,
+                                          color = if (isSelected) Color.White else Color.LightGray,
+                                          fontWeight = FontWeight.SemiBold,
+                                          fontSize = 12.sp
+                                      )
+                                  }
+                              }
+                          }
+
+                          // Priority Selector
+                          Text("Priority:", color = Color.Gray, fontSize = 12.sp)
+                          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              listOf("Normal", "High", "Urgent").forEach { p ->
+                                  FilterChip(
+                                      selected = priority == p,
+                                      onClick = { priority = p },
+                                      label = { Text(p) }
+                                  )
+                              }
+                          }
+
+                          // Category Selector
+                          Text("Category:", color = Color.Gray, fontSize = 12.sp)
+                          Row(
+                              modifier = Modifier.horizontalScroll(rememberScrollState()),
+                              horizontalArrangement = Arrangement.spacedBy(6.dp)
+                          ) {
+                              categories.forEach { cat ->
+                                  FilterChip(
+                                      selected = category == cat,
+                                      onClick = { category = cat },
+                                      label = { Text(cat) }
+                                  )
+                              }
+                          }
+
+                          // Extra Toggles (15m Heads-Up & Pin)
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Text("Also alert 15 mins prior", color = Color.White, fontSize = 13.sp)
+                              Switch(checked = alert15MinPrior, onCheckedChange = { alert15MinPrior = it })
+                          }
+
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Text("Pin to top of schedule", color = Color.White, fontSize = 13.sp)
+                              Switch(checked = isPinned, onCheckedChange = { isPinned = it })
+                          }
+                      }
+                  },
+                  confirmButton = {
+                      Button(
+                          onClick = {
+                              if (title.isBlank()) return@Button
+                              val recurringCsv = selectedWeekDays.sorted().joinToString(",")
+
+                              val computedMillis = if (recurringCsv.isNotBlank()) {
+                                  AlarmScheduler.computeNextRecurringMillis(selectedHour, selectedMinute, recurringCsv)
+                              } else {
+                                  Calendar.getInstance().apply {
+                                      timeInMillis = selectedDateMillis
+                                      set(Calendar.HOUR_OF_DAY, selectedHour)
+                                      set(Calendar.MINUTE, selectedMinute)
+                                      set(Calendar.SECOND, 0)
+                                      set(Calendar.MILLISECOND, 0)
+                                  }.timeInMillis
+                              }
+
+                              onSave(
+                                  ScheduleItem(
+                                      id = initialItem?.id ?: 0,
+                                      title = title.trim(),
+                                      category = category,
+                                      location = location.trim().ifBlank { "IITB Campus" },
+                                      notes = notes.trim(),
+                                      priority = priority,
+                                      eventTimeMillis = computedMillis,
+                                      hour = selectedHour,
+                                      minute = selectedMinute,
+                                      recurringDays = recurringCsv,
+                                      isReminderActive = true,
+                                      alert15MinPrior = alert15MinPrior,
+                                      isPinned = isPinned,
+                                      isCompleted = initialItem?.isCompleted ?: false
+                                  )
+                              )
+                          },
+                          colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF387AFF))
+                      ) {
+                          Text("Save & Arm Alerts", color = Color.White)
+                      }
+                  },
+                  dismissButton = {
+                      TextButton(onClick = onDismiss) { Text("Cancel", color = Color.Gray) }
+                  }
+              )
+
+              if (showDatePicker) {
+                  val datePickerState = rememberDatePickerState(initialSelectedDateMillis = selectedDateMillis)
+                  DatePickerDialog(
+                      onDismissRequest = { showDatePicker = false },
+                      confirmButton = {
+                          TextButton(
+                              onClick = {
+                                  datePickerState.selectedDateMillis?.let { selectedDateMillis = it }
+                                  showDatePicker = false
+                              }
+                          ) {
+                              Text("OK")
+                          }
+                      },
+                      dismissButton = {
+                          TextButton(onClick = { showDatePicker = false }) { Text("Cancel") }
+                      }
+                  ) {
+                      DatePicker(state = datePickerState)
+                  }
+              }
+
+              if (showTimePicker) {
+                  val timePickerState = rememberTimePickerState(
+                      initialHour = selectedHour,
+                      initialMinute = selectedMinute,
+                      is24Hour = false
+                  )
+                  AlertDialog(
+                      onDismissRequest = { showTimePicker = false },
+                      containerColor = Color(0xFF1C1C1E),
+                      title = { Text("Select Event Time", color = Color.White, fontSize = 16.sp) },
+                      text = {
+                          Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                              TimePicker(state = timePickerState)
+                          }
+                      },
+                      confirmButton = {
+                          TextButton(
+                              onClick = {
+                                  selectedHour = timePickerState.hour
+                                  selectedMinute = timePickerState.minute
+                                  showTimePicker = false
+                              }
+                          ) {
+                              Text("OK")
+                          }
+                      },
+                      dismissButton = {
+                          TextButton(onClick = { showTimePicker = false }) { Text("Cancel") }
+                      }
+                  )
+              }
+          }
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload Compiled APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: IITB-Schedule-Pro-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
